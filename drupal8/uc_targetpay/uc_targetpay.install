@@ -1,0 +1,103 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the uc_targetpay module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function uc_targetpay_schema()
+{
+    $schema = array();
+    
+    $schema['uc_payment_targetpay'] = array(
+        'description' => 'Logs targetpay Instant Payment Notifications.',
+        'fields' => array(
+            'id' => array(
+                'type' => 'serial',
+                'not null' => TRUE,
+                'description' => 'id'
+            ),
+            'order_id' => array(
+                'type' => 'int',
+                'not null' => TRUE,
+                'default' => 0,
+                'description' => 'order_id'
+            ),
+            'paymethod' => array(
+                'type' => 'varchar',
+                'length' => 8,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+            'transaction_id' => array(
+                'type' => 'varchar',
+                'length' => 255,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+            'rtlo' => array(
+                'type' => 'int',
+                'not null' => TRUE,
+                'default' => 0
+            ),
+            'testmode' => array(
+                'type' => 'int',
+                'not null' => TRUE,
+                'size' => 'tiny',
+                'default' => 0
+            ),
+            'bank_id' => array(
+                'type' => 'varchar',
+                'length' => 8,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+            'description' => array(
+                'type' => 'varchar',
+                'length' => 64,
+                'not null' => TRUE,
+                'default' => ''
+            ),
+            'amount' => array(
+                'type' => 'numeric',
+                'not null' => TRUE,
+                'precision' => 10,
+                'scale' => 2
+            ),
+            'status' => array(
+                'type' => 'int',
+                'not null' => TRUE,
+                'default' => 0
+            ),
+            'created' => array(
+                'mysql_type' => 'datetime',
+                'not null' => TRUE
+            )
+        ),
+        
+        'primary key' => array(
+            'id'
+        ),
+        'indexes' => array(
+            'transaction_id' => array(
+                'transaction_id'
+            )
+        )
+    );
+    
+    return $schema;
+}
+
+/**
+ * Alter table to add default which schema hook cannot 
+ */
+function uc_targetpay_install()
+{
+    db_query('ALTER TABLE  {uc_payment_targetpay} CHANGE  `created`  `created` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
+    
+    db_query('ALTER TABLE  {uc_payment_targetpay} ADD  `modified` TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP AFTER  `created`');
+    
+}

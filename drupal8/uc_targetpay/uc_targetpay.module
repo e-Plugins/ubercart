@@ -1,0 +1,370 @@
+<?php
+use Drupal\Core\Database\Database;
+use Drupal\uc_targetpay\Plugin\Ubercart\PaymentMethod\TargetPayCore;
+
+/**
+ *
+ * @param unknown $paymethod            
+ * @param unknown $transaction_id            
+ * @return unknown
+ */
+function uc_targetpay_transaction_get($paymethod, $transaction_id)
+{
+    return db_query("SELECT * FROM {uc_payment_targetpay} WHERE paymethod = :paymethod AND transaction_id = :transaction_id", array(
+        ':paymethod' => $paymethod,
+        ':transaction_id' => $transaction_id
+    ))->fetchObject();
+}
+
+
+/**
+ *
+ * @param unknown $order            
+ * @param unknown $obj            
+ */
+function uc_targetpay_call($order, $obj)
+{
+    global $base_url;
+    $bankId = $_SESSION['uc_targetpay']['bankId'];
+    $payMethod = $_SESSION['uc_targetpay']['payMethod'];
+    $countryId = $_SESSION['uc_targetpay']['countryId'];
+    
+    $conf = $obj->getConfiguration();
+    
+    $targetPay = new TargetPayCore($payMethod, $conf['rtlo'], 'nl', $conf['testmode']);
+    
+    $cancelUrl = $base_url . '/cart/checkout?cancel=1&paymethod=%payMethod%';
+    $returnUrl = $base_url . '/targetpay/returnurl?paymethod=%payMethod%';
+    $reportUrl = $base_url . '/targetpay/reporturl?paymethod=%payMethod%';
+    
+    $transaction = new \stdClass();
+    $transaction->order_id = $order->id();
+    $transaction->bankId = $bankId;
+    $transaction->status = 0;
+    $transaction->amount = $order->getTotal();
+    $transaction->description = "Order " . $order->id();
+    $transaction->rtlo = $conf['rtlo'];
+    $transaction->testMode = $conf['testmode'];
+    
+    $targetPay->setAmount(round($transaction->amount * 100));
+    $targetPay->setDescription($transaction->description);
+    $targetPay->setBankId($transaction->bankId);
+    $targetPay->setCountryId($countryId);
+    // Callback URL
+    $targetPay->setCancelUrl($cancelUrl);
+    $targetPay->setReturnUrl($returnUrl);
+    $targetPay->setReportUrl($reportUrl);
+    
+    if ($payMethod == 'AFP') {
+        additionalParametersAFP($order, $targetPay); // add addtitional params for afterpay and bankwire
+    }
+    if ($payMethod == 'BW') {
+        additionalParametersBW($order, $targetPay); // add addtitional params for afterpay and bankwire
+    }
+    if ($targetPay->startPayment()) {
+        $transaction->transaction_id = $targetPay->getTransactionId();
+        $transaction->paymethod = $targetPay->getPayMethod();
+        $transaction->bankId = $targetPay->getBankId();
+        $transaction->moreInformation = $targetPay->moreInformation;
+        $redirectPage = $targetPay->getBankUrl();
+        
+        uc_targetpay_transaction_save($transaction);
+        
+        // For bankwire, after starting API, open the instruction page
+        if ($payMethod == 'BW') {
+            // store order_id and moreInformation into session for instruction page
+            $_SESSION['bw_info'] = [
+                'bw_data' => $targetPay->moreInformation,
+                'order_total' => $order->order_total->value,
+                'customer_email' => $order->primary_email->value
+            ];
+            $redirectPage = $base_url . '/targetpay/instruction';
+        }
+
+        $response = new \Symfony\Component\HttpFoundation\RedirectResponse($redirectPage);
+        
+        $response->send();
+    } else {
+        \Drupal::logger('uc_targetpay')->error('Payment creation failed. Error message: ' . $targetPay->getErrorMessage());
+        
+        drupal_set_message(t($targetPay->getErrorMessage()), 'error');
+        $response = new \Symfony\Component\HttpFoundation\RedirectResponse($base_url . '/cart/checkout');
+        $response->send();
+    }
+}
+
+/**
+ *
+ * @param unknown $transaction            
+ */
+function uc_targetpay_transaction_save($transaction)
+{
+    $conn = Database::getConnection();
+    $conn->insert('uc_payment_targetpay')
+        ->fields(array(
+        'order_id' => $transaction->order_id,
+        'paymethod' => $transaction->paymethod,
+        'transaction_id' => $transaction->transaction_id,
+        'bank_id' => $transaction->bankId,
+        'rtlo' => $transaction->rtlo,
+        'testmode' => $transaction->testMode,
+        'description' => $transaction->description,
+        'amount' => $transaction->amount
+    ))
+        ->execute();
+}
+
+/**
+ *
+ * @param unknown $transaction_id            
+ * @param number $status            
+ */
+function uc_targetpay_transaction_status_update($transaction_id, $status = 0)
+{
+    $conn = Database::getConnection();
+    $conn->update('uc_payment_targetpay')
+        ->fields([
+        'status' => $status
+    ])
+        ->condition('transaction_id', $transaction_id)
+        ->execute();
+}
+
+/**
+ *
+ * @param unknown $form            
+ * @param unknown $form_state            
+ * @param unknown $form_id            
+ */
+function uc_targetpay_form_alter(&$form, &$form_state, $form_id)
+{
+    if ($form_id == 'uc_cart_checkout_form') {
+        $form['panes']['payment']['payment_method']['#disabled'] = false;
+        $form['#attached']['library'][] = 'uc_targetpay/uc_targetpay.style';
+    }
+}
+
+/**
+ * 
+ * @param unknown $country
+ * @param unknown $phone
+ * @return unknown
+ */
+function format_phone($country, $phone)
+{
+    $function = 'format_phone_' . strtolower($country);
+    if (function_exists($function)) {
+        return $function($phone);
+    } else {
+        echo "unknown phone formatter for country: " . $function;
+        exit();
+    }
+    return $phone;
+}
+
+/**
+ * 
+ * @param unknown $phone
+ * @return string|mixed
+ */
+function format_phone_nld($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+31" . $phone;
+            break;
+        case 10:
+            return "+31" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+/**
+ * 
+ * @param unknown $phone
+ * @return string|mixed
+ */
+function format_phone_bel($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+32" . $phone;
+            break;
+        case 10:
+            return "+32" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+/**
+ * 
+ * @param unknown $street
+ * @return NULL[]|string[]|unknown[]
+ */
+function breakDownStreet($street)
+{
+    $out = [];
+    $addressResult = null;
+    preg_match("/(?P<address>\D+) (?P<number>\d+) (?P<numberAdd>.*)/", $street, $addressResult);
+    if (! $addressResult) {
+        preg_match("/(?P<address>\D+) (?P<number>\d+)/", $street, $addressResult);
+    }
+    $out['street'] = array_key_exists('address', $addressResult) ? $addressResult['address'] : null;
+    $out['houseNumber'] = array_key_exists('number', $addressResult) ? $addressResult['number'] : null;
+    $out['houseNumberAdd'] = array_key_exists('numberAdd', $addressResult) ? trim(strtoupper($addressResult['numberAdd'])) : null;
+    return $out;
+}
+
+function additionalParametersAFP($order, TargetPayCore $targetPay)
+{
+    // Supported countries are: Netherlands (NLD) and in Belgium (BEL)
+    $billingCountry = (strtoupper($order->billing_country->value) == 'BE' ? 'BEL' : 'NLD');
+    $shippingCountry = (strtoupper($order->delivery_country->value) == 'BE' ? 'BEL' : 'NLD');
+    
+    $streetParts = breakDownStreet($order->billing_street1->value);
+    
+    $targetPay->bindParam('billingstreet', $streetParts['street']);
+    $targetPay->bindParam('billinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $targetPay->bindParam('billingpostalcode', $order->billing_postal_code->value);
+    $targetPay->bindParam('billingcity', $order->billing_city->value);
+    $targetPay->bindParam('billingpersonemail', $order->primary_email->value);
+    $targetPay->bindParam('billingpersonsurname', $order->billing_last_name->value);
+    $targetPay->bindParam('billingcountrycode', $billingCountry);
+    $targetPay->bindParam('billingpersonlanguagecode', $billingCountry);
+    $targetPay->bindParam('billingpersonphonenumber', format_phone($billingCountry, $order->billing_phone->value));
+    $targetPay->bindParam('billingpersoninitials', "");
+    $targetPay->bindParam('billingpersongender', "");
+    $targetPay->bindParam('billingpersonbirthdate', "");
+    
+    $streetParts = breakDownStreet($order->delivery_street1->value);
+    
+    $targetPay->bindParam('shippingstreet', $streetParts['street']);
+    $targetPay->bindParam('shippinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $targetPay->bindParam('shippingpostalcode', $order->delivery_postal_code->value);
+    $targetPay->bindParam('shippingcity', $order->delivery_city->value);
+    $targetPay->bindParam('shippingpersonemail', $order->primary_email->value);
+    $targetPay->bindParam('shippingpersonsurname', $order->delivery_last_name->value);
+    $targetPay->bindParam('shippingcountrycode', $shippingCountry);
+    $targetPay->bindParam('shippingpersonlanguagecode', $shippingCountry);
+    $targetPay->bindParam('shippingpersonphonenumber', format_phone($shippingCountry, $order->delivery_phone->value));
+    $targetPay->bindParam('shippingpersoninitials', "");
+    $targetPay->bindParam('shippingpersongender', "");
+    $targetPay->bindParam('shippingpersonbirthdate', "");
+    
+    
+    
+    // Getting the items in the order
+    $invoicelines = [];
+    $total_amount_by_products = 0;
+    
+    // Iterating through each item in the order
+    foreach ($order->products as $product) {
+        $total_amount_by_products += $product->price->value;
+        $invoicelines[] = [
+            'productCode' => $product->model->value,
+            'productDescription' => $product->title->value,
+            'quantity' => $product->qty->value,
+            'price' => $product->price->value,
+            'taxCategory' => 4
+        ];
+    }
+    if($order->getTotal() - $total_amount_by_products > 0) {
+        $invoicelines[] = [
+            'productCode' => '000000',
+            'productDescription' => "Other fees (shipping, additional fees)",
+            'quantity' => 1,
+            'price' =>  $order->getTotal() - $total_amount_by_products,
+            'taxCategory' => 4
+        ];
+    }
+
+    $targetPay->bindParam('invoicelines', json_encode($invoicelines));
+    $targetPay->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ *
+ * @param unknown $order            
+ * @param TargetPayCore $targetPay            
+ */
+function additionalParametersBW($order, TargetPayCore $targetPay)
+{
+    $targetPay->bindParam('salt', $targetPay->bwSalt);
+    $targetPay->bindParam('email', $order->primary_email->value);
+    $targetPay->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ * 
+ * @param unknown $paymethod
+ * @param unknown $trxid
+ * @param string $message
+ * @return boolean
+ */
+function executeReport($paymethod, $trxid, &$message = '')
+{
+    $transaction = uc_targetpay_transaction_get($paymethod, $trxid);
+    if ($transaction) {
+        if ((bool) $transaction->status) {
+            $message = "Already completed, skipped... ";
+            return true;
+        }
+        
+        $rtlo = $transaction->rtlo;
+        $testMode = $transaction->testmode;
+        $targetPay = new TargetPayCore($transaction->paymethod, $rtlo, 'nl', $testMode);
+
+        $targetPay->checkPayment($transaction->transaction_id);
+        $checkPayment = (bool) $targetPay->getPaidStatus();
+        
+        if ($checkPayment) {
+            $message = t('Succesfull TargetPay payment received for order @order_id', array(
+                '@order_id' => $transaction->order_id
+            ));
+
+            uc_payment_enter($transaction->order_id, 'targetpay_wps', $transaction->amount, 0, array(
+                'transaction_id' => $transaction->transaction_id
+            ), $message);
+            uc_order_comment_save($transaction->order_id, 0, $message, 'admin');
+            uc_targetpay_transaction_status_update($transaction->transaction_id, 1);
+            
+            return true;
+        } else {
+            $message = "Not paid " . $targetPay->getErrorMessage() . "... ";
+            return false;
+        }
+    } else {
+        $message = "Transaction " . $transaction->transaction_id . " not found... ";
+        \Drupal::logger('uc_targetpay')->warning('Unkown transaction ID.');
+        return false;
+    }
+}
+?>

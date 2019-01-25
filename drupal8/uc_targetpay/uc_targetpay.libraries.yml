@@ -1,0 +1,5 @@
+uc_targetpay.style:
+  version: 1.x
+  css:
+    theme:
+      css/targetpay-checkout.css: {}

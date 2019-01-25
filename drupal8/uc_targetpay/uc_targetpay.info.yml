@@ -1,0 +1,16 @@
+name: Targetpay
+description: Payment plugins iDeal, Bancontact, PaysafeCard, Sofort, Visa-Master
+package: Ubercart - payment
+type: module
+version: 1.0
+  
+interface translation project: uc_targetpay
+interface translation server pattern: sites/all/modules/uc_targetpay/translations/%language.po
+
+core: 8.x
+  
+datestamp: 1485241067
+
+dependencies:
+  - uc_payment
+  

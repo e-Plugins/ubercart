@@ -1,0 +1,11 @@
+name = TargetPay.com (iDEAL, Bancontact, Sofort Banking, Paysafe card, Credit card, Paypal, Afterpay, Bankwire)
+description = TargetPay.com payments: iDEAL, Bancontact, Sofort Banking, Paysafe card, Credit card, Paypal, Afterpay, Bankwire
+dependencies[] = uc_cart
+dependencies[] = uc_payment
+package = "Ubercart - payment"
+core = 7.x
+php = 5.0
+files[] = targetpay.class.php
+
+interface translation project = uc_targetpay
+l10n path = sites/all/modules/uc_targetpay/translations/%language.po

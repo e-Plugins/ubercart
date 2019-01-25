@@ -1,0 +1,651 @@
+<?php
+/**
+ * @file 	Provides support for TargetPay iDEAL, Bancontact and Sofort Banking
+ * @author	Yellow Melon B.V. / www.idealplugins.nl
+ */
+require_once ("targetpay.class.php");
+
+$GLOBALS['listMethods'] = array(
+    "IDE" => 'iDEAL',
+    "MRC" => 'Bancontact',
+    "DEB" => 'Sofort Banking',
+    'WAL' => 'Paysafe Card',
+    'CC' => 'Credit Card',
+    "AFP" => 'Afterpay',
+    'PYP' => 'Paypal',
+    'BW' => 'Bankwire'
+);
+
+function uc_targetpay_menu()
+{
+    $items['cart/checkout/targetpay/return'] = array(
+        'title' => 'TargetPay Payment',
+        'page callback' => 'uc_targetpay_return',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    $items['cart/checkout/targetpay/report'] = array(
+        'title' => 'TargetPay Payment',
+        'page callback' => 'uc_targetpay_report',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    
+    $items['cart/checkout/targetpay/bwintro'] = array(
+        'title' => 'Bankwire Introduction',
+        'page callback' => 'uc_targetpay_bwintro',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    return $items;
+}
+
+function uc_targetpay_init()
+{
+    drupal_add_css(drupal_get_path('module', 'uc_targetpay') . '/css/uc_targetpay.css');
+}
+
+function uc_targetpay_theme()
+{
+    return array(
+        'uc_targetpay_payment_form' => array(
+            'arguments' => array(
+                'form' => NULL
+            )
+        )
+    );
+}
+
+function uc_targetpay_uc_payment_method()
+{
+    $methods[] = array(
+        'id' => 'targetpay',
+        'name' => t('TargetPay'),
+        'title' => t('TargetPay'),
+        'desc' => t('Pay by iDEAL/Bancontact/Sofort Banking/Paysafe card/Credit card'),
+        'callback' => 'uc_payment_method_targetpay',
+        'weight' => 1,
+        'checkout' => TRUE,
+        'no_gateway' => TRUE
+    );
+    return $methods;
+}
+
+function uc_payment_method_targetpay($op, &$order, $form = NULL, &$form_state = NULL)
+{
+    switch ($op) {
+        case "order-delete":
+            db_delete('uc_payment_targetpay')->condition('order_id', $order->order_id)->execute();
+            break;
+        case "cart-details":
+            $details = uc_targetpay_payment_form(array(), $form_state, $order);
+            return $details;
+            break;
+        case "cart-process":
+            if (empty(drupal_get_messages(null, false))) {
+                $order->payment_details['targetpay_method'] = check_plain($form_state['input']['uc_targetpay_method']);
+                $order->payment_details['targetpay_option'] = check_plain($form_state['input']['uc_targetpay_option'][$form_state['input']['uc_targetpay_method']]);
+                $_SESSION['uc_targetpay']['targetpay_method'] = $order->payment_details['targetpay_method'];
+                $_SESSION['uc_targetpay']['targetpay_option'] = $order->payment_details['targetpay_option'];
+            }
+            return TRUE;
+            break;
+        case "order-details":
+            $details = uc_targetpay_payment_form(array(), $form_state, $order);
+            return $details;
+        case "order-submit":
+            if ($order->payment_method === 'targetpay') {
+                uc_targetpay_call($order);
+                exit();
+            }
+            break;
+        case "settings":
+            global $listMethods;
+            $form['uc_targetpay_rtlo'] = array(
+                '#type' => 'textfield',
+                '#title' => t('TargetPay layoutcode (rtlo)'),
+                '#default_value' => variable_get('uc_targetpay_rtlo', 93929), // Default TargetPay is 93929
+                '#description' => t('Your TargetPay layout (=sub account) code. <br/>Look up your layoutcode on the page ' . '<a href="https://www.targetpay.com/subaccounts" target=_blank>\'Manage subaccounts\'</a> (existing account)<br/>or get a new, free ' . 'account on <a href="https://www.targetpay.com/signup" target=_blank>www.targetpay.com/signup</a> (use promotional code <strong>YM3R2A</strong> for a reduced iDEAL price)')
+            );
+            $form['uc_targetpay_test_mode'] = array(
+                '#type' => 'checkbox',
+                '#title' => t('Test mode'),
+                '#default_value' => variable_get('uc_targetpay_test_mode', 0),
+                '#description' => t('Enable test mode. All payment attempts will be flagged as paid. Handle with care!')
+            );
+            
+            foreach ($GLOBALS['listMethods'] as $id => $name) {
+                $methodName = 'uc_targetpay_enable_' . strtolower($id);
+                $form[$methodName] = array(
+                    '#type' => 'checkbox',
+                    '#title' => sprintf(t('Enable %s'), $name),
+                    '#default_value' => variable_get($methodName, 0),
+                    '#description' => sprintf(t('Enable %s'), $name)
+                );
+            }
+            
+            return $form;
+    }
+}
+
+function uc_targetpay_payment_form($form_state, $order)
+{
+    $listMethods = $GLOBALS['listMethods'];
+    $rtlo = variable_get('uc_targetpay_rtlo');
+    $options = array();
+    $form = array();
+    foreach ($GLOBALS['listMethods'] as $id => $name) {
+        $methodName = 'uc_targetpay_enable_' . strtolower($id);
+        if (variable_get($methodName) == 1) {
+            $form = array_merge($form, buildOptionsMethod($id, $rtlo, $order));
+        }
+    }
+    return $form;
+}
+
+function uc_targetpay_call($order)
+{
+    global $base_url;
+    $payMethod = $_SESSION['uc_targetpay']['targetpay_option'];
+    
+    $targetPay = new TargetPayCore($payMethod, variable_get('uc_targetpay_rtlo'), 'nl', variable_get('uc_targetpay_test_mode', 0));
+    $returnUrl = $base_url . '/cart/checkout/targetpay/return?paymethod=%payMethod%';
+    $reportUrl = $base_url . '/cart/checkout/targetpay/report?paymethod=%payMethod%';
+    
+    $transaction = new stdClass();
+    $transaction->order_id = $order->order_id;
+    $transaction->bank_id = check_plain($payMethod);
+    $transaction->status = 0;
+    $transaction->amount = $order->order_total;
+    $transaction->description = t("Order @order_id - @site_name", array(
+        '@order_id' => $order->order_id,
+        '@site_name' => variable_get('site_name', '')
+    ));
+    
+    $targetPay->setAmount($transaction->amount * 100);
+    $targetPay->setDescription($transaction->description);
+    $targetPay->setReturnUrl($returnUrl);
+    $targetPay->setReportUrl($reportUrl);
+    $targetPay->setBankId($transaction->bank_id);
+    
+    if ($targetPay->getPayMethod() == 'AFP') {
+        additionalParametersAFP($order, $targetPay);
+    }
+    if ($targetPay->getPayMethod() == 'BW') {
+        additionalParametersBW($order, $targetPay);
+    }
+    
+    if ($targetPay->startPayment()) {
+        $transaction->transaction_id = $targetPay->getTransactionId();
+        $transaction->paymethod = $targetPay->getPayMethod();
+        $transaction->bank_id = $targetPay->getBankId();
+        uc_targetpay_transaction_save($transaction);
+        
+        if ($targetPay->getPayMethod() == 'BW') { // open an instruction page
+            if (session_status() == PHP_SESSION_NONE) {
+                session_start();
+            }
+            
+            $_SESSION['bw_info'] = [
+                'bw_data' => $targetPay->getMoreInformation(),
+                'order_total' => $transaction->amount,
+                'customer_email' => $order->primary_email
+            ];
+            drupal_goto('/cart/checkout/targetpay/bwintro');
+        }
+        
+        header("Location: " . $targetPay->getBankUrl());
+        exit();
+    } else {
+        watchdog('uc_targetpay', t('Payment creation failed. Error message: %error', array(
+            '%error' => $targetPay->getErrorMessage()
+        )), WATCHDOG_ERROR);
+        drupal_set_message(t($targetPay->getErrorMessage()), 'error');
+        drupal_goto('cart/checkout');
+    }
+}
+
+function format_phone($country, $phone)
+{
+    $function = 'format_phone_' . strtolower($country);
+    if (function_exists($function)) {
+        return $function($phone);
+    } else {
+        echo "unknown phone formatter for country: " . $function;
+        exit();
+    }
+    return $phone;
+}
+
+function format_phone_nld($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+31" . $phone;
+            break;
+        case 10:
+            return "+31" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+function format_phone_bel($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+32" . $phone;
+            break;
+        case 10:
+            return "+32" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+function breakDownStreet($street)
+{
+    $out = [];
+    $addressResult = null;
+    preg_match("/(?P<address>\D+) (?P<number>\d+) (?P<numberAdd>.*)/", $street, $addressResult);
+    if (! $addressResult) {
+        preg_match("/(?P<address>\D+) (?P<number>\d+)/", $street, $addressResult);
+    }
+    $out['street'] = array_key_exists('address', $addressResult) ? $addressResult['address'] : null;
+    $out['houseNumber'] = array_key_exists('number', $addressResult) ? $addressResult['number'] : null;
+    $out['houseNumberAdd'] = array_key_exists('numberAdd', $addressResult) ? trim(strtoupper($addressResult['numberAdd'])) : null;
+    return $out;
+}
+
+/**
+ *
+ * @param unknown $order            
+ * @param TargetPayCore $targetPay            
+ */
+function additionalParametersAFP($order, TargetPayCore $targetPay)
+{
+    // Supported countries are: Netherlands (NLD) and in Belgium (BEL). Belgium = 56 | Netherlands = 528
+    $billingCountry = ($order->billing_country) == 56 ? 'BEL' : 'NLD';
+    $shippingCountry = ($order->delivery_country) == 56 ? 'BEL' : 'NLD';
+    
+    $streetParts = breakDownStreet($order->billing_street1);
+    
+    $targetPay->bindParam('billingstreet', $streetParts['street']);
+    $targetPay->bindParam('billinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $targetPay->bindParam('billingpostalcode', $order->billing_postal_code);
+    $targetPay->bindParam('billingcity', $order->billing_city);
+    $targetPay->bindParam('billingpersonemail', $order->primary_email);
+    $targetPay->bindParam('billingpersonsurname', $order->billing_last_name);
+    $targetPay->bindParam('billingcountrycode', $billingCountry);
+    $targetPay->bindParam('billingpersonlanguagecode', $billingCountry);
+    $targetPay->bindParam('billingpersonphonenumber', format_phone($billingCountry, $order->billing_phone));
+    $targetPay->bindParam('billingpersoninitials', "");
+    $targetPay->bindParam('billingpersongender', "");
+    $targetPay->bindParam('billingpersonbirthdate', "");
+    
+    $streetParts = breakDownStreet($order->delivery_street1);
+    
+    $targetPay->bindParam('shippingstreet', $streetParts['street']);
+    $targetPay->bindParam('shippinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $targetPay->bindParam('shippingpostalcode', $order->delivery_postal_code);
+    $targetPay->bindParam('shippingcity', $order->delivery_city);
+    $targetPay->bindParam('shippingpersonemail', $order->primary_email);
+    $targetPay->bindParam('shippingpersonsurname', $order->delivery_last_name);
+    $targetPay->bindParam('shippingcountrycode', $shippingCountry);
+    $targetPay->bindParam('shippingpersonlanguagecode', $billingCountry);
+    $targetPay->bindParam('shippingpersonphonenumber', format_phone($shippingCountry, $order->delivery_phone));
+    $targetPay->bindParam('shippingpersoninitials', "");
+    $targetPay->bindParam('shippingpersongender', "");
+    $targetPay->bindParam('shippingpersonbirthdate', "");
+    
+    // Getting the items in the order
+    $invoicelines = [];
+    $total_amount_by_products = 0;
+    
+    // Iterating through each item in the order
+    foreach ($order->products as $product) {
+        $total_amount_by_products += $product->price;
+        $invoicelines[] = [
+            'productCode' => $product->nid,
+            'productDescription' => $product->title,
+            'quantity' => $product->qty,
+            'price' => $product->price, // Price without tax
+            'taxCategory' => 4
+        ];
+    }
+    if ($order->order_total - $total_amount_by_products > 0) {
+        $invoicelines[] = [
+            'productCode' => '000000',
+            'productDescription' => "Other fees (shipping, additional fees)",
+            'quantity' => 1,
+            'price' => $order->order_total - $total_amount_by_products,
+            'taxCategory' => 4
+        ];
+    }
+    
+    $targetPay->bindParam('invoicelines', json_encode($invoicelines));
+    $targetPay->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ *
+ * @param unknown $order            
+ * @param TargetPayCore $targetPay            
+ */
+function additionalParametersBW($order, TargetPayCore $targetPay)
+{
+    $targetPay->bindParam('salt', $targetPay->bwSalt);
+    $targetPay->bindParam('email', $order->primary_email);
+    $targetPay->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ * Function to show bankwire introduction page
+ */
+function uc_targetpay_bwintro()
+{
+    error_reporting(E_ALL & ~E_NOTICE);
+
+    if (empty($_SESSION['bw_info']))
+        return false;
+    
+    $data = $_SESSION['bw_info'];
+    list ($trxid, $accountNumber, $iban, $bic, $beneficiary, $bank) = explode("|", $data['bw_data']);
+    
+    $html = '<div class="bankwire-info">
+            <h4>'.t('Thank you for ordering in our webshop!').'</h4>
+            <p>'.
+                t('You will receive your order as soon as we receive payment from the bank. <br>
+                Would you be so friendly to transfer the total amount of @order_total to the bankaccount <b class="tm-highlight">@iban</b> in name of @beneficiary*?',
+                    array('@order_total' => uc_currency_format($data['order_total']), '@iban' => $iban, '@beneficiary' => $beneficiary))
+    
+                    .'</p>
+            <p>
+                '.t('State the payment feature <b>@trxid</b>, this way the payment can be automatically processed.<br>
+                As soon as this happens you shall receive a confirmation mail on @customer_email .',
+                        array('@trxid' => $trxid, '@customer_email' => $data['customer_email'])).'
+            </p>
+            <p>'.t('If it is necessary for payments abroad, then the BIC code from the bank <span class="tm-highlight">@bic</span> and the name of the bank is @bank.',
+                    array('@bic' => $bic, '@bank' => $bank)).'</p>
+            <p>
+                <i>'.t('* Payment for our webstore is processed by TargetMedia. TargetMedia is certified as a Collecting Payment Service Provider by Currence. This means we set the highest security standards when is comes to security of payment for you as a customer and us as a webshop.').'</i>
+            </p>
+        </div>';
+    
+    $build = array(
+        '#type' => 'markup',
+        '#markup' => $html
+    );
+    return $build;
+}
+
+/**
+ *
+ * @param unknown $paymethod
+ * @param unknown $trxid
+ * @param string $message
+ * @return boolean
+ */
+function executeReport($paymethod, $trxid, &$message = '')
+{
+    $transaction = uc_targetpay_transaction_get($trxid);
+    if ($transaction) {
+        if ((bool) $transaction->status) {
+            $message = "Already completed, skipped... ";
+            return true;
+        }
+
+        $targetPay = new TargetPayCore($transaction->paymethod, variable_get('uc_targetpay_rtlo'), 'nl', variable_get('uc_targetpay_test_mode'));
+
+        $targetPay->checkPayment($transaction->transaction_id);
+        $checkPayment = (bool) $targetPay->getPaidStatus();
+
+        if ($checkPayment) {
+            $message = t('Succesfull TargetPay payment received for order @order_id', array(
+                '@order_id' => $transaction->order_id
+            ));
+
+            uc_payment_enter($transaction->order_id, 'targetpay', $transaction->amount, 0, array(
+                'transaction_id' => $transaction->transaction_id
+            ), $message);
+            uc_order_comment_save($transaction->order_id, 0, $message, 'admin');
+            uc_targetpay_transaction_status_update($transaction->transaction_id, 1);
+
+            return true;
+        } else {
+            $message = "Not paid " . $targetPay->getErrorMessage() . "... ";
+            return false;
+        }
+    } else {
+        $message = "Transaction " . $transaction->transaction_id . " not found... ";
+        watchdog('uc_targetpay', $message, array(), WATCHDOG_WARNING);
+        
+        return false;
+    }
+}
+
+function uc_targetpay_return()
+{
+    $paymethod = $_GET['paymethod'];   //GET
+    
+    switch ($paymethod) {
+        case 'PYP':
+            $trxid = $_GET['paypalid'];
+            break;
+        default:
+            $trxid = $_GET['trxid'];
+    }
+    $message = '';
+    
+    if (executeReport($paymethod, $trxid, $message)) {
+        drupal_set_message($message);
+        $_SESSION['do_complete'] = TRUE;
+        $_SESSION['uc_checkout'][$trxid]['do_complete'] = TRUE;
+        $goto = 'cart/checkout/complete';
+    } else {
+        drupal_set_message($message, 'error');
+        $goto = 'cart/checkout';
+    }
+    drupal_goto($goto);
+}
+
+function uc_targetpay_report()
+{
+    $paymethod = $_GET['paymethod'];   //GET
+    switch ($paymethod) {
+        case 'AFP':
+            $trxid = $_POST['invoiceID']; //POST
+            break;
+        case 'PYP':
+            $trxid = $_POST['acquirerID']; //POST old paymentID
+            break;
+        default:
+            $trxid = $_POST['trxid']; //POST
+    }
+    $message = '';
+    executeReport($paymethod, $trxid, $message);
+    echo($message);
+    
+    echo "|<br>nl Ubercart, " . date('d-m-Y');
+    exit();
+}
+
+function buildOptionsMethod($method, $rtlo, $order)
+{
+    $listMethods = $GLOBALS['listMethods'];
+    $selectedMethod = ! empty($_SESSION['uc_targetpay']['targetpay_method']) ? $_SESSION['uc_targetpay']['targetpay_method'] : @array_keys($listMethods)[0];
+    $selected = ($method == $selectedMethod);
+    switch ($method) {
+        case "IDE":
+            $idealOBJ = new TargetPayCore($method, $rtlo);
+            $idealBankListArr = setPaymethodInKey("IDE", $idealOBJ->getBankList());
+            $selectedOption = $selected && ! empty($_SESSION['uc_targetpay']['targetpay_option']) ? $_SESSION['uc_targetpay']['targetpay_option'] : @array_keys($idealBankListArr)[0];
+            $form['uc_targetpay_method_' . $method] = array(
+                '#type' => 'radio',
+                '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+                '#suffix' => '</div>',
+                '#name' => 'uc_targetpay_method',
+                '#title' => $listMethods[$method],
+                '#attributes' => array(
+                    'value' => $method
+                )
+            );
+            if ($selected) {
+                $form['uc_targetpay_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['dependent_' . $method] = array(
+                '#type' => 'container',
+                '#title' => false,
+                '#attributes' => array(
+                    'class' => array(
+                        'container-targetpay-option'
+                    )
+                ),
+                '#states' => array(
+                    'visible' => array(
+                        'input[name="uc_targetpay_method"]' => array(
+                            'value' => $method
+                        )
+                    )
+                )
+            );
+            
+            $form['dependent_' . $method]['uc_targetpay_select'] = array(
+                '#type' => 'select',
+                '#name' => "uc_targetpay_option[$method]",
+                '#options' => $idealBankListArr,
+                '#default_value' => $selectedOption
+            );
+            return $form;
+            break;
+        case "DEB":
+            $directEBankingOBJ = new TargetPayCore($method, $rtlo);
+            $directEBankingBankListArr = setPaymethodInKey("", $directEBankingOBJ->getCountryList());
+            $selectedOption = $selected && ! empty($_SESSION['uc_targetpay']['targetpay_option']) ? $_SESSION['uc_targetpay']['targetpay_option'] : @array_keys($directEBankingBankListArr)[0];
+            $form['uc_targetpay_method_' . $method] = array(
+                '#type' => 'radio',
+                '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+                '#suffix' => '</div>',
+                '#name' => 'uc_targetpay_method',
+                '#title' => $listMethods[$method],
+                '#attributes' => array(
+                    'value' => $method
+                )
+            );
+            if ($selected) {
+                $form['uc_targetpay_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['dependent_' . $method] = array(
+                '#type' => 'container',
+                '#title' => false,
+                '#attributes' => array(
+                    'class' => array(
+                        'container-targetpay-option'
+                    )
+                ),
+                '#states' => array(
+                    'visible' => array(
+                        'input[name="uc_targetpay_method"]' => array(
+                            'value' => $method
+                        )
+                    )
+                )
+            );
+            $form['dependent_' . $method]['uc_targetpay_select'] = array(
+                '#type' => 'select',
+                '#name' => "uc_targetpay_option[$method]",
+                '#options' => $directEBankingBankListArr,
+                '#default_value' => $selectedOption
+            );
+            return $form;
+            break;
+        case "MRC":
+        case "WAL":
+        case "CC":
+        default:
+            $form['uc_targetpay_method_' . $method] = array(
+                '#type' => 'radio',
+                '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+                '#suffix' => '</div>',
+                '#name' => 'uc_targetpay_method',
+                '#title' => $listMethods[$method],
+                '#attributes' => array(
+                    'value' => $method
+                )
+            );
+            if ($selected) {
+                $form['uc_targetpay_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['uc_targetpay_options_' . $method] = array(
+                '#type' => 'hidden',
+                '#name' => "uc_targetpay_option[$method]",
+                '#title' => $listMethods[$method],
+                '#value' => $method
+            );
+            return $form;
+            break;
+    }
+}
+
+function setPaymethodInKey($paymethod, $BankListArray)
+{
+    $newArr = array();
+    foreach ($BankListArray as $key => $value) {
+        $newArr[strtoupper($paymethod) . $key] = $value;
+    }
+    return $newArr;
+}
+
+function uc_targetpay_transaction_save($transaction)
+{
+    (array) $transaction;
+    drupal_write_record('uc_payment_targetpay', $transaction);
+}
+
+function uc_targetpay_transaction_get($transaction_id)
+{
+    return db_query("SELECT * FROM {uc_payment_targetpay} WHERE transaction_id = :transaction_id", array(
+        ':transaction_id' => $transaction_id
+    ))->fetchObject();
+}
+
+function uc_targetpay_transaction_status_update($transaction_id, $status = 0)
+{
+    db_update('uc_payment_targetpay')->fields(array(
+        'status' => $status
+    ))
+        ->condition('transaction_id', check_plain($transaction_id))
+        ->execute();
+}

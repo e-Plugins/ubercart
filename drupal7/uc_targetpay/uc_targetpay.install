@@ -1,0 +1,60 @@
+<?php
+
+/**
+ * @file
+ * Install hooks for uc_targetpay.module.
+ */
+function uc_targetpay_schema()
+{
+    $schema = array();
+    
+    $schema['uc_payment_targetpay'] = array(
+        'description' => t("Table for TargetPay transactions"),
+        'fields' => array(
+            'order_id' => array(
+                'type' => 'int',
+                'default' => 0,
+                'not null' => TRUE
+            ),
+            'paymethod' => array(
+                'type' => 'varchar',
+                'length' => 8,
+                'default' => 'IDE',
+                'not null' => TRUE
+            ),
+            'transaction_id' => array(
+                'type' => 'varchar',
+                'length' => 255,
+                'default' => 0,
+                'not null' => TRUE
+            ),
+            'bank_id' => array(
+                'type' => 'varchar',
+                'length' => 8,
+                'default' => 0,
+                'not null' => TRUE
+            ),
+            'description' => array(
+                'type' => 'varchar',
+                'not null' => TRUE,
+                'default' => '0',
+                'length' => 64
+            ),
+            'amount' => array(
+                'type' => 'numeric',
+                'precision' => 16,
+                'scale' => 5,
+                'not null' => TRUE,
+                'default' => 0.0
+            ),
+            'status' => array(
+                'type' => 'int',
+                'not null' => TRUE,
+                'default' => 0,
+                'length' => 5
+            )
+        )
+    );
+    
+    return $schema;
+}

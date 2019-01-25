@@ -1,0 +1,24 @@
+#Capture submit order form to call API then redirect to banking site or print our error
+uc_targetpay.content:
+  path: '/targetpay/returnurl'
+  defaults:
+    _controller: 'Drupal\uc_targetpay\Controller\TargetpayController::returnurl'
+    _title: 'Return Url'
+  requirements:
+    _permission: 'access content'
+    
+uc_targetpay.reporturl:
+  path: '/targetpay/reporturl'
+  defaults:
+    _controller: 'Drupal\uc_targetpay\Controller\TargetpayController::reporturl'
+    _title: 'Report Url'
+  requirements:
+    _permission: 'access content'
+
+uc_targetpay.instruction:
+  path: '/targetpay/instruction'
+  defaults:
+    _controller: 'Drupal\uc_targetpay\Controller\TargetpayController::instruction'
+    _title: 'Instruction Bankwire'
+  requirements:
+    _permission: 'access content'
