@@ -1,0 +1,438 @@
+<?php
+use Drupal\Core\Database\Database;
+use Drupal\uc_digiwallet\Plugin\Ubercart\PaymentMethod\DigiwalletCore;
+
+/**
+ *
+ * @param unknown $paymethod            
+ * @param unknown $transaction_id            
+ * @return unknown
+ */
+function uc_digiwallet_transaction_get($paymethod, $transaction_id)
+{
+    return db_query("SELECT * FROM {uc_payment_digiwallet} WHERE paymethod = :paymethod AND transaction_id = :transaction_id", array(
+        ':paymethod' => $paymethod,
+        ':transaction_id' => $transaction_id
+    ))->fetchObject();
+}
+
+
+/**
+ *
+ * @param unknown $order            
+ * @param unknown $obj            
+ */
+function uc_digiwallet_call($order, $obj)
+{
+    global $base_url;
+    $transactionId = $bankUrl = $message = $result = $data = null;
+    $bankId = $_SESSION['uc_digiwallet']['bankId'];
+    $payMethod = $_SESSION['uc_digiwallet']['payMethod'];
+    $countryId = $_SESSION['uc_digiwallet']['countryId'];
+    $conf = $obj->getConfiguration();
+    $returnUrl = $base_url . "/digiwallet/returnurl?paymethod=$payMethod";
+    $reportUrl = $base_url . "/digiwallet/reporturl?paymethod=$payMethod";
+    $amount = $order->getTotal();
+    $description = "Order " . $order->id();
+    
+    if (in_array($payMethod, ['EPS', 'GIP'])) {
+	    $dwApi = new Digiwallet\Packages\Transaction\Client\Client('https://api.digiwallet.nl/');
+	    $formParams = [
+	        'outletId' => $conf['rtlo'],
+	        'currencyCode' => 'EUR',
+	        'consumerEmail' => @$order->primary_email->value,
+	        'description' => $description,
+	        'returnUrl' => $returnUrl,
+	        'reportUrl' => $reportUrl,
+	        'consumerIp' => uc_digiwallet_get_customer_ip(),
+	        'suggestedLanguage' => 'NLD',
+	        'amountChangeable' => false,
+	        'inputAmount' => $amount * 100,
+	        'paymentMethods' => [
+	            $payMethod,
+	        ],
+	        'app_id' => DigiwalletCore::APP_ID,
+	    ];
+	    
+	    $request = new Digiwallet\Packages\Transaction\Client\Request\CreateTransaction($dwApi, $formParams);
+	    $request->withBearer($conf['token']);
+	    /** @var \Digiwallet\Packages\Transaction\Client\Response\CreateTransaction $apiResult */
+	    $apiResult = $request->send();
+	    $result = 0 == $apiResult->status() ? true : false;
+	    $message = $apiResult->message();
+	    $transactionId = $apiResult->transactionId();
+	    $bankUrl = $apiResult->launchUrl();
+	    $data = json_encode($apiResult->response());
+	} else {
+		$digiwallet = new DigiwalletCore($payMethod, $conf['rtlo'], 'nl');
+	    $digiwallet->setAmount(round($amount * 100));
+	    $digiwallet->setDescription($description);
+	    $digiwallet->setBankId($bankId);
+	    $digiwallet->setCountryId($countryId);
+	    $digiwallet->setReturnUrl($returnUrl);
+	    $digiwallet->setReportUrl($reportUrl);
+	    $digiwallet->bindParam('email', @$order->primary_email->value);
+	    
+	    if ($payMethod == 'AFP') {
+	        uc_digiwallet_additional_parameters_AFP($order, $digiwallet); // add addtitional params for afterpay and bankwire
+	    }
+	    if ($payMethod == 'BW') {
+	        uc_digiwallet_additional_parameters_BW($order, $digiwallet); // add addtitional params for afterpay and bankwire
+		}
+		
+        $result = $digiwallet->startPayment();
+        
+        $transactionId = $digiwallet->getTransactionId();
+        $bankUrl = $digiwallet->getBankUrl();
+        $message = $digiwallet->getErrorMessage();
+        $data = $digiwallet->moreInformation;
+    }
+    
+    if (false !== $result) {
+        $transaction = new \stdClass();
+	    $transaction->order_id = $order->id();
+        $transaction->bank_id = $bankId;
+        $transaction->status = 0;
+        $transaction->amount = $amount;
+        $transaction->description = $description;
+        $transaction->rtlo = $conf['rtlo'];
+        $transaction->token = $conf['token'];
+        $transaction->transaction_id = $transactionId;
+        $transaction->paymethod = $payMethod;
+        $transaction->more_information = $data;
+        $transaction->created = date('Y-m-d H:i:s');
+        uc_digiwallet_transaction_save($transaction);
+        
+        // For bankwire, after starting API, open the instruction page
+        if ($payMethod == 'BW') {
+            //set order status to Pending
+            $order->setStatusId('pending')->save();
+            $bankUrl = $base_url . '/digiwallet/instruction/' . $transactionId;
+        }
+
+        $response = new \Symfony\Component\HttpFoundation\RedirectResponse($bankUrl);
+        
+        $response->send();
+    } else {
+        \Drupal::logger('uc_digiwallet')->error('Payment creation failed. Error message: ' . $message);
+        
+        drupal_set_message(t($message), 'error');
+        $response = new \Symfony\Component\HttpFoundation\RedirectResponse($base_url . '/cart/checkout');
+        $response->send();
+    }
+}
+
+/**
+ *
+ * @param unknown $transaction            
+ */
+function uc_digiwallet_transaction_save($transaction)
+{
+    $conn = Database::getConnection();
+    $conn->insert('uc_payment_digiwallet')
+        ->fields(array(
+        'order_id' => $transaction->order_id,
+        'paymethod' => $transaction->paymethod,
+        'transaction_id' => $transaction->transaction_id,
+        'rtlo' => $transaction->rtlo,
+        'token' => $transaction->token,
+        'bank_id' => $transaction->bank_id,
+        'description' => $transaction->description,
+        'amount' => $transaction->amount,
+        'status' => $transaction->status,
+        'more_information' => $transaction->more_information,
+        'created' => $transaction->created
+    ))
+        ->execute();
+}
+
+/**
+ *
+ * @param unknown $transaction_id            
+ * @param number $status            
+ */
+function uc_digiwallet_transaction_status_update($transaction_id, $status = 0)
+{
+    $conn = Database::getConnection();
+    $conn->update('uc_payment_digiwallet')
+        ->fields([
+        'status' => $status
+    ])
+        ->condition('transaction_id', $transaction_id)
+        ->execute();
+}
+
+/**
+ *
+ * @param unknown $form            
+ * @param unknown $form_state            
+ * @param unknown $form_id            
+ */
+function uc_digiwallet_form_alter(&$form, &$form_state, $form_id)
+{
+    if ($form_id == 'uc_cart_checkout_form') {
+        $form['panes']['payment']['payment_method']['#disabled'] = false;
+        $form['#attached']['library'][] = 'uc_digiwallet/uc_digiwallet.style';
+    }
+}
+
+/**
+ * 
+ * @param unknown $country
+ * @param unknown $phone
+ * @return unknown
+ */
+function uc_digiwallet_format_phone($country, $phone)
+{
+    $function = 'uc_digiwallet_format_phone_' . strtolower($country);
+    if (function_exists($function)) {
+        return $function($phone);
+    } else {
+        echo "unknown phone formatter for country: " . $function;
+        exit();
+    }
+    return $phone;
+}
+
+/**
+ * 
+ * @param unknown $phone
+ * @return string|mixed
+ */
+function uc_digiwallet_format_phone_nld($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+31" . $phone;
+            break;
+        case 10:
+            return "+31" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+/**
+ * 
+ * @param unknown $phone
+ * @return string|mixed
+ */
+function uc_digiwallet_format_phone_bel($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+32" . $phone;
+            break;
+        case 10:
+            return "+32" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+/**
+ * 
+ * @param unknown $street
+ * @return NULL[]|string[]|unknown[]
+ */
+function uc_digiwallet_break_down_street($street)
+{
+    $out = [];
+    $addressResult = null;
+    preg_match("/(?P<address>\D+) (?P<number>\d+) (?P<numberAdd>.*)/", $street, $addressResult);
+    if (! $addressResult) {
+        preg_match("/(?P<address>\D+) (?P<number>\d+)/", $street, $addressResult);
+    }
+    $out['street'] = array_key_exists('address', $addressResult) ? $addressResult['address'] : null;
+    $out['houseNumber'] = array_key_exists('number', $addressResult) ? $addressResult['number'] : null;
+    $out['houseNumberAdd'] = array_key_exists('numberAdd', $addressResult) ? trim(strtoupper($addressResult['numberAdd'])) : null;
+    return $out;
+}
+
+function uc_digiwallet_additional_parameters_AFP($order, DigiwalletCore $digiwallet)
+{
+    // Supported countries are: Netherlands (NLD) and in Belgium (BEL)
+    $billingCountry = (strtoupper($order->billing_country->value) == 'BE' ? 'BEL' : 'NLD');
+    $shippingCountry = (strtoupper($order->delivery_country->value) == 'BE' ? 'BEL' : 'NLD');
+    
+    $streetParts = uc_digiwallet_break_down_street($order->billing_street1->value);
+    
+    $digiwallet->bindParam('billingstreet', $streetParts['street']);
+    $digiwallet->bindParam('billinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $digiwallet->bindParam('billingpostalcode', $order->billing_postal_code->value);
+    $digiwallet->bindParam('billingcity', $order->billing_city->value);
+    $digiwallet->bindParam('billingpersonemail', $order->primary_email->value);
+    $digiwallet->bindParam('billingpersonsurname', $order->billing_last_name->value);
+    $digiwallet->bindParam('billingcountrycode', $billingCountry);
+    $digiwallet->bindParam('billingpersonlanguagecode', $billingCountry);
+    $digiwallet->bindParam('billingpersonphonenumber', uc_digiwallet_format_phone($billingCountry, $order->billing_phone->value));
+    $digiwallet->bindParam('billingpersoninitials', "");
+    $digiwallet->bindParam('billingpersongender', "");
+    $digiwallet->bindParam('billingpersonbirthdate', "");
+    
+    $streetParts = uc_digiwallet_break_down_street($order->delivery_street1->value);
+    
+    $digiwallet->bindParam('shippingstreet', $streetParts['street']);
+    $digiwallet->bindParam('shippinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $digiwallet->bindParam('shippingpostalcode', $order->delivery_postal_code->value);
+    $digiwallet->bindParam('shippingcity', $order->delivery_city->value);
+    $digiwallet->bindParam('shippingpersonemail', $order->primary_email->value);
+    $digiwallet->bindParam('shippingpersonsurname', $order->delivery_last_name->value);
+    $digiwallet->bindParam('shippingcountrycode', $shippingCountry);
+    $digiwallet->bindParam('shippingpersonlanguagecode', $shippingCountry);
+    $digiwallet->bindParam('shippingpersonphonenumber', uc_digiwallet_format_phone($shippingCountry, $order->delivery_phone->value));
+    $digiwallet->bindParam('shippingpersoninitials', "");
+    $digiwallet->bindParam('shippingpersongender', "");
+    $digiwallet->bindParam('shippingpersonbirthdate', "");
+    
+    
+    
+    // Getting the items in the order
+    $invoicelines = [];
+    $total_amount_by_products = 0;
+    
+    // Iterating through each item in the order
+    foreach ($order->products as $product) {
+        $total_amount_by_products += $product->price->value;
+        $invoicelines[] = [
+            'productCode' => $product->model->value,
+            'productDescription' => $product->title->value,
+            'quantity' => $product->qty->value,
+            'price' => $product->price->value,
+            'taxCategory' => 4
+        ];
+    }
+    if($order->getTotal() - $total_amount_by_products > 0) {
+        $invoicelines[] = [
+            'productCode' => '000000',
+            'productDescription' => "Other fees (shipping, additional fees)",
+            'quantity' => 1,
+            'price' =>  $order->getTotal() - $total_amount_by_products,
+            'taxCategory' => 4
+        ];
+    }
+
+    $digiwallet->bindParam('invoicelines', json_encode($invoicelines));
+    $digiwallet->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ *
+ * @param unknown $order            
+ * @param DigiwalletCore $digiwallet            
+ */
+function uc_digiwallet_additional_parameters_BW($order, DigiwalletCore $digiwallet)
+{
+    $digiwallet->bindParam('salt', $digiwallet->bwSalt);
+    $digiwallet->bindParam('email', $order->primary_email->value);
+    $digiwallet->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ * 
+ * @param unknown $paymethod
+ * @param unknown $trxid
+ * @param string $message
+ * @return boolean
+ */
+function uc_digiwallet_execute_report($paymethod, $trxid, &$message = '', $report = false)
+{
+    $transaction = uc_digiwallet_transaction_get($paymethod, $trxid);
+    if ($transaction) {
+        if ((bool) $transaction->status) {
+            if ($report) {
+	            $message = "Already completed, skipped... ";
+            } else {
+	             $message = t('Succesfull Digiwallet payment received for order @order_id', array(
+	                '@order_id' => $transaction->order_id
+	            ));
+            }
+            return true;
+        }
+        
+        $rtlo = $transaction->rtlo;
+        $token = $transaction->token;
+        $isSuccess = false;
+        $errorMessage = null;
+		if (in_array($paymethod, array('EPS', 'GIP'))) {
+		    $digiwalletApi = new Digiwallet\Packages\Transaction\Client\Client('https://api.digiwallet.nl/');
+		    $request = new Digiwallet\Packages\Transaction\Client\Request\CheckTransaction($digiwalletApi);
+		    $request->withBearer($token);
+		    $request->withOutlet($rtlo);
+		    $request->withTransactionId($trxid);
+		    /** @var \Digiwallet\Packages\Transaction\Client\Response\CheckTransaction $apiResult */
+		    $apiResult = $request->send();
+		    $apiStatus = $apiResult->getStatus();
+		    $isSuccess = ($apiStatus == 0 && $apiResult->getTransactionStatus() == 'Completed') ? true : false;
+		    $errorMessage = $apiResult->getMessage();
+		} else {
+		    $digiwallet = new DigiwalletCore($paymethod, $rtlo, 'nl');
+		    $digiwallet->checkPayment($trxid);
+		    $isSuccess = (bool) $digiwallet->getPaidStatus();
+		    $errorMessage = $digiwallet->getErrorMessage();
+		}
+        
+        if ($isSuccess) {
+            $message = t('Succesfull Digiwallet payment received for order @order_id', array(
+                '@order_id' => $transaction->order_id
+            ));
+
+            uc_payment_enter($transaction->order_id, 'digiwallet_wps', $transaction->amount, 0, array(
+                'transaction_id' => $transaction->transaction_id
+            ), $message);
+            uc_order_comment_save($transaction->order_id, 0, $message, 'admin');
+            uc_digiwallet_transaction_status_update($transaction->transaction_id, 1);
+            
+            return true;
+        } else {
+            $message = "Not paid " . $errorMessage . "... ";
+            return false;
+        }
+    } else {
+        $message = "Transaction " . $trxid . " not found... ";
+        \Drupal::logger('uc_digiwallet')->warning('Unkown transaction ID.');
+        return false;
+    }
+}
+
+function uc_digiwallet_get_customer_ip()
+{
+    if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+        //ip from share internet
+        $ip = $_SERVER['HTTP_CLIENT_IP'];
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        //ip pass from proxy
+        $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+    } else {
+        $ip = $_SERVER['REMOTE_ADDR'];
+    }
+    
+    return $ip;
+}
+?>

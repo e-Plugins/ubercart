@@ -152,7 +152,13 @@ function uc_targetpay_payment_form($form_state, $order)
 function uc_targetpay_call($order)
 {
     global $base_url;
-    $payMethod = $_SESSION['uc_targetpay']['targetpay_option'];
+    $bankId = $countryId = null;
+    $payMethod = $_SESSION['uc_targetpay']['targetpay_method'];
+    if ($payMethod == 'IDE') {
+        $bankId = $_SESSION['uc_targetpay']['targetpay_option'];
+    } else if ($payMethod == 'DEB') {
+        $countryId = $_SESSION['uc_targetpay']['targetpay_option'];
+    }
     
     $targetPay = new TargetPayCore($payMethod, variable_get('uc_targetpay_rtlo'), 'nl', variable_get('uc_targetpay_test_mode', 0));
     $returnUrl = $base_url . '/cart/checkout/targetpay/return?paymethod=%payMethod%';
@@ -160,7 +166,6 @@ function uc_targetpay_call($order)
     
     $transaction = new stdClass();
     $transaction->order_id = $order->order_id;
-    $transaction->bank_id = check_plain($payMethod);
     $transaction->status = 0;
     $transaction->amount = $order->order_total;
     $transaction->description = t("Order @order_id - @site_name", array(
@@ -172,7 +177,11 @@ function uc_targetpay_call($order)
     $targetPay->setDescription($transaction->description);
     $targetPay->setReturnUrl($returnUrl);
     $targetPay->setReportUrl($reportUrl);
-    $targetPay->setBankId($transaction->bank_id);
+    $targetPay->setBankId($bankId);
+    $targetPay->setCountryId($countryId);
+    if ($order->primary_email) {
+        $targetPay->bindParam('email', $order->primary_email);
+    }
     
     if ($targetPay->getPayMethod() == 'AFP') {
         additionalParametersAFP($order, $targetPay);
@@ -510,7 +519,7 @@ function buildOptionsMethod($method, $rtlo, $order)
     switch ($method) {
         case "IDE":
             $idealOBJ = new TargetPayCore($method, $rtlo);
-            $idealBankListArr = setPaymethodInKey("IDE", $idealOBJ->getBankList());
+            $idealBankListArr = setPaymethodInKey("", $idealOBJ->getBankList());
             $selectedOption = $selected && ! empty($_SESSION['uc_targetpay']['targetpay_option']) ? $_SESSION['uc_targetpay']['targetpay_option'] : @array_keys($idealBankListArr)[0];
             $form['uc_targetpay_method_' . $method] = array(
                 '#type' => 'radio',

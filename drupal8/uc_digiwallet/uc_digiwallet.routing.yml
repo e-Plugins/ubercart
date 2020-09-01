@@ -1,0 +1,24 @@
+#Capture submit order form to call API then redirect to banking site or print our error
+uc_digiwallet.content:
+  path: '/digiwallet/returnurl'
+  defaults:
+    _controller: 'Drupal\uc_digiwallet\Controller\DigiwalletController::returnurl'
+    _title: 'Return Url'
+  requirements:
+    _permission: 'access content'
+    
+uc_digiwallet.reporturl:
+  path: '/digiwallet/reporturl'
+  defaults:
+    _controller: 'Drupal\uc_digiwallet\Controller\DigiwalletController::reporturl'
+    _title: 'Report Url'
+  requirements:
+    _permission: 'access content'
+
+uc_digiwallet.instruction:
+  path: '/digiwallet/instruction/{trxid}'
+  defaults:
+    _controller: 'Drupal\uc_digiwallet\Controller\DigiwalletController::instruction'
+    _title: 'Instruction Bankwire'
+  requirements:
+    _permission: 'access content'

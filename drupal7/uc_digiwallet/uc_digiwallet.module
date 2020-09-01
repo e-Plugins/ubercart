@@ -1,0 +1,770 @@
+<?php
+/**
+ * @file Activates iDEAL, Bancontact, Sofort Banking, Visa / Mastercard Credit cards, PaysafeCard, AfterPay, BankWire, PayPal and Refunds in Ubercart
+ * @author DigiWallet.nl <techsupport@targetmedia.nl>
+ * @copyright Copyright (C) 2018-2020 e-plugins.nl
+ * @url: https://www.digiwallet.nl
+ */
+require_once ("digiwallet.class.php");
+require_once('vendor/autoload.php');
+
+$GLOBALS['listMethods'] = array(
+    "IDE" => 'iDEAL',
+    "MRC" => 'Bancontact',
+    "DEB" => 'Sofort Banking',
+    'WAL' => 'Paysafe Card',
+    'CC' => 'Credit Card',
+    "AFP" => 'Afterpay',
+    'PYP' => 'Paypal',
+    'BW' => 'Bankwire',
+    'EPS' => 'EPS',
+    'GIP' => 'Giropay'
+);
+
+function uc_digiwallet_menu()
+{
+    $items['cart/checkout/digiwallet/return'] = array(
+        'title' => 'Digiwallet Payment',
+        'page callback' => 'uc_digiwallet_return',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    $items['cart/checkout/digiwallet/report'] = array(
+        'title' => 'Digiwallet Payment',
+        'page callback' => 'uc_digiwallet_report',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    
+    $items['cart/checkout/digiwallet/bwintro'] = array(
+        'title' => 'Bankwire Introduction',
+        'page callback' => 'uc_digiwallet_bwintro',
+        'access arguments' => array(
+            'access content'
+        ),
+        'type' => MENU_CALLBACK
+    );
+    return $items;
+}
+
+function uc_digiwallet_init()
+{
+    drupal_add_css(drupal_get_path('module', 'uc_digiwallet') . '/css/uc_digiwallet.css');
+}
+
+function uc_digiwallet_theme()
+{
+    return array(
+        'uc_digiwallet_payment_form' => array(
+            'arguments' => array(
+                'form' => NULL
+            )
+        )
+    );
+}
+
+function uc_digiwallet_uc_payment_method()
+{
+    $methods[] = array(
+        'id' => 'digiwallet',
+        'name' => t('Digiwallet'),
+        'title' => t('Digiwallet'),
+        'desc' => t('Pay by iDEAL/Bancontact/Sofort Banking/Paysafe card/Credit card'),
+        'callback' => 'uc_payment_method_digiwallet',
+        'weight' => 1,
+        'checkout' => TRUE,
+        'no_gateway' => TRUE
+    );
+    return $methods;
+}
+
+function uc_payment_method_digiwallet($op, &$order, $form = NULL, &$form_state = NULL)
+{
+    switch ($op) {
+        case "order-delete":
+            db_delete('uc_payment_digiwallet')->condition('order_id', $order->order_id)->execute();
+            break;
+        case "cart-details":
+            $details = uc_digiwallet_payment_form(array(), $form_state, $order);
+            return $details;
+            break;
+        case "cart-process":
+            $order->payment_details['digiwallet_method'] = check_plain($form_state['input']['uc_digiwallet_method']);
+            $order->payment_details['digiwallet_option'] = check_plain($form_state['input']['uc_digiwallet_option'][$form_state['input']['uc_digiwallet_method']]);
+            $_SESSION['uc_digiwallet']['digiwallet_method'] = $order->payment_details['digiwallet_method'];
+            $_SESSION['uc_digiwallet']['digiwallet_option'] = $order->payment_details['digiwallet_option'];
+            return TRUE;
+            break;
+        case "order-details":
+            $details = uc_digiwallet_payment_form(array(), $form_state, $order);
+            return $details;
+        case "order-submit":
+            if ($order->payment_method === 'digiwallet') {
+                uc_digiwallet_call($order);
+                exit();
+            }
+            break;
+        case "settings":
+            $form['uc_digiwallet_rtlo'] = array(
+                '#type' => 'textfield',
+                '#title' => t('Digiwallet Outlet Identifier'),
+                '#default_value' => variable_get('uc_digiwallet_rtlo', 93929),
+                '#description' => t('Your Digiwallet Outlet Identifier, You can find this in your organization dashboard under Websites & Outlets on https://www.digiwallet.nl')
+            );
+            $form['uc_digiwallet_token'] = array(
+                '#type' => 'textfield',
+                '#title' => t('Digiwallet token'),
+                '#default_value' => variable_get('uc_digiwallet_token', ''), //
+                '#description' => t('Obtain a token from http://digiwallet.nl')
+            );
+            foreach ($GLOBALS['listMethods'] as $id => $name) {
+                $methodName = 'uc_digiwallet_enable_' . strtolower($id);
+                $form[$methodName] = array(
+                    '#type' => 'checkbox',
+                    '#title' => sprintf(t('Enable %s'), $name),
+                    '#default_value' => variable_get($methodName, 0),
+                    '#description' => sprintf(t('Enable %s'), $name)
+                );
+            }
+            
+            return $form;
+    }
+}
+
+function uc_digiwallet_payment_form($form_state, $order)
+{
+    $rtlo = variable_get('uc_digiwallet_rtlo');
+    $form = array();
+    foreach ($GLOBALS['listMethods'] as $id => $name) {
+        $methodName = 'uc_digiwallet_enable_' . strtolower($id);
+        if (variable_get($methodName) == 1) {
+            $form = array_merge($form, uc_digiwallet_buildOptionsMethod($id, $rtlo, $order));
+        }
+    }
+    return $form;
+}
+
+function uc_digiwallet_call($order)
+{
+    global $base_url;
+    $bankId = $countryId = null;
+    $transactionId = $bankUrl = $message = $result = $data = null;
+    $rtlo = variable_get('uc_digiwallet_rtlo');
+    $token = variable_get('uc_digiwallet_token');
+    $payMethod = $_SESSION['uc_digiwallet']['digiwallet_method'];
+    if ($payMethod == 'IDE') {
+        $bankId = $_SESSION['uc_digiwallet']['digiwallet_option'];
+    } else if ($payMethod == 'DEB') {
+        $countryId = $_SESSION['uc_digiwallet']['digiwallet_option'];
+    }
+    $returnUrl = $base_url . "/cart/checkout/digiwallet/return?paymethod=$payMethod";
+    $reportUrl = $base_url . "/cart/checkout/digiwallet/report?paymethod=$payMethod";
+    $amount = $order->order_total;
+    $description = t("Order @order_id - @site_name", array(
+        '@order_id' => $order->order_id,
+        '@site_name' => variable_get('site_name', '')
+    ));
+    
+    if (in_array($payMethod, ['EPS', 'GIP'])) {
+        $dwApi = new Digiwallet\Packages\Transaction\Client\Client('https://api.digiwallet.nl/');
+        $formParams = [
+            'outletId' => $rtlo,
+            'currencyCode' => 'EUR',
+            'consumerEmail' => @$order->primary_email,
+            'description' => $description,
+            'returnUrl' => $returnUrl,
+            'reportUrl' => $reportUrl,
+            'consumerIp' => uc_digiwallet_get_customer_ip(),
+            'suggestedLanguage' => 'NLD',
+            'amountChangeable' => false,
+            'inputAmount' => $amount * 100,
+            'paymentMethods' => [
+                $payMethod,
+            ],
+            'app_id' => DigiwalletCore::APP_ID,
+        ];
+        
+        $request = new Digiwallet\Packages\Transaction\Client\Request\CreateTransaction($dwApi, $formParams);
+        $request->withBearer($token);
+        /** @var \Digiwallet\Packages\Transaction\Client\Response\CreateTransaction $apiResult */
+        $apiResult = $request->send();
+        $result = 0 == $apiResult->status() ? true : false;
+        $message = $apiResult->message();
+        $transactionId = $apiResult->transactionId();
+        $bankUrl = $apiResult->launchUrl();
+        $data = json_encode($apiResult->response());
+    } else {
+        $digiwallet = new DigiwalletCore($payMethod, $rtlo, 'nl');
+        $digiwallet->setAmount(round($amount * 100));
+        $digiwallet->setDescription($description);
+        $digiwallet->setBankId($bankId);
+        $digiwallet->setCountryId($countryId);
+        $digiwallet->setReturnUrl($returnUrl);
+        $digiwallet->setReportUrl($reportUrl);
+        $digiwallet->bindParam('email', $order->primary_email);
+        
+        if ($payMethod == 'AFP') {
+            uc_digiwallet_additional_parameters_AFP($order, $digiwallet); // add addtitional params for afterpay and bankwire
+        }
+        if ($payMethod == 'BW') {
+            uc_digiwallet_additional_parameters_BW($order, $digiwallet); // add addtitional params for afterpay and bankwire
+        }
+        
+        $result = $digiwallet->startPayment();
+        
+        $transactionId = $digiwallet->getTransactionId();
+        $bankUrl = $digiwallet->getBankUrl();
+        $message = $digiwallet->getErrorMessage();
+        $data = $digiwallet->moreInformation;
+    }
+    
+    if (false !== $result) {
+        $transaction = new \stdClass();
+        $transaction->order_id = $order->order_id;
+        $transaction->bank_id = $bankId;
+        $transaction->status = 0;
+        $transaction->amount = $amount;
+        $transaction->description = $description;
+        $transaction->rtlo = $rtlo;
+        $transaction->token = $token;
+        $transaction->transaction_id = $transactionId;
+        $transaction->paymethod = $payMethod;
+        $transaction->more_information = $data;
+        $transaction->created = date('Y-m-d H:i:s');
+        uc_digiwallet_transaction_save($transaction);
+        
+        if ($payMethod == 'BW') { // open an instruction page
+            if (session_status() == PHP_SESSION_NONE) {
+                session_start();
+            }
+            
+            $_SESSION['bw_info'] = [
+                'bw_data' => $digiwallet->getMoreInformation(),
+                'order_total' => $transaction->amount,
+                'customer_email' => $order->primary_email
+            ];
+            drupal_goto('/cart/checkout/digiwallet/bwintro');
+        }
+        
+        header("Location: " . $bankUrl);
+        exit();
+    } else {
+        watchdog('uc_digiwallet', t('Payment creation failed. Error message: %error', array(
+            '%error' => $message
+        )), WATCHDOG_ERROR);
+        drupal_set_message($message, 'error');
+        drupal_goto('cart/checkout');
+    }
+}
+
+function uc_digiwallet_format_phone($country, $phone)
+{
+    $function = 'uc_digiwallet_format_phone_' . strtolower($country);
+    if (function_exists($function)) {
+        return $function($phone);
+    } else {
+        echo "unknown phone formatter for country: " . $function;
+        exit();
+    }
+    return $phone;
+}
+
+function uc_digiwallet_format_phone_nld($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+31" . $phone;
+            break;
+        case 10:
+            return "+31" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+function uc_digiwallet_format_phone_bel($phone)
+{
+    // note: making sure we have something
+    if (! isset($phone{3})) {
+        return '';
+    }
+    // note: strip out everything but numbers
+    $phone = preg_replace("/[^0-9]/", "", $phone);
+    $length = strlen($phone);
+    switch ($length) {
+        case 9:
+            return "+32" . $phone;
+            break;
+        case 10:
+            return "+32" . substr($phone, 1);
+            break;
+        case 11:
+        case 12:
+            return "+" . $phone;
+            break;
+        default:
+            return $phone;
+            break;
+    }
+}
+
+function uc_digiwallet_breakDownStreet($street)
+{
+    $out = [];
+    $addressResult = null;
+    preg_match("/(?P<address>\D+) (?P<number>\d+) (?P<numberAdd>.*)/", $street, $addressResult);
+    if (! $addressResult) {
+        preg_match("/(?P<address>\D+) (?P<number>\d+)/", $street, $addressResult);
+    }
+    $out['street'] = array_key_exists('address', $addressResult) ? $addressResult['address'] : null;
+    $out['houseNumber'] = array_key_exists('number', $addressResult) ? $addressResult['number'] : null;
+    $out['houseNumberAdd'] = array_key_exists('numberAdd', $addressResult) ? trim(strtoupper($addressResult['numberAdd'])) : null;
+    return $out;
+}
+
+/**
+ *
+ * @param unknown $order
+ * @param DigiwalletCore $digiwallet
+ */
+function uc_digiwallet_additional_parameters_AFP($order, DigiwalletCore $digiwallet)
+{
+    // Supported countries are: Netherlands (NLD) and in Belgium (BEL). Belgium = 56 | Netherlands = 528
+    $billingCountry = ($order->billing_country) == 56 ? 'BEL' : 'NLD';
+    $shippingCountry = ($order->delivery_country) == 56 ? 'BEL' : 'NLD';
+    
+    $streetParts = uc_digiwallet_breakDownStreet($order->billing_street1);
+    
+    $digiwallet->bindParam('billingstreet', $streetParts['street']);
+    $digiwallet->bindParam('billinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $digiwallet->bindParam('billingpostalcode', $order->billing_postal_code);
+    $digiwallet->bindParam('billingcity', $order->billing_city);
+    $digiwallet->bindParam('billingpersonemail', $order->primary_email);
+    $digiwallet->bindParam('billingpersonsurname', $order->billing_last_name);
+    $digiwallet->bindParam('billingcountrycode', $billingCountry);
+    $digiwallet->bindParam('billingpersonlanguagecode', $billingCountry);
+    $digiwallet->bindParam('billingpersonphonenumber', uc_digiwallet_format_phone($billingCountry, $order->billing_phone));
+    $digiwallet->bindParam('billingpersoninitials', "");
+    $digiwallet->bindParam('billingpersongender', "");
+    $digiwallet->bindParam('billingpersonbirthdate', "");
+    
+    $streetParts = uc_digiwallet_breakDownStreet($order->delivery_street1);
+    
+    $digiwallet->bindParam('shippingstreet', $streetParts['street']);
+    $digiwallet->bindParam('shippinghousenumber', $streetParts['houseNumber'] . $streetParts['houseNumberAdd']);
+    $digiwallet->bindParam('shippingpostalcode', $order->delivery_postal_code);
+    $digiwallet->bindParam('shippingcity', $order->delivery_city);
+    $digiwallet->bindParam('shippingpersonemail', $order->primary_email);
+    $digiwallet->bindParam('shippingpersonsurname', $order->delivery_last_name);
+    $digiwallet->bindParam('shippingcountrycode', $shippingCountry);
+    $digiwallet->bindParam('shippingpersonlanguagecode', $billingCountry);
+    $digiwallet->bindParam('shippingpersonphonenumber', uc_digiwallet_format_phone($shippingCountry, $order->delivery_phone));
+    $digiwallet->bindParam('shippingpersoninitials', "");
+    $digiwallet->bindParam('shippingpersongender', "");
+    $digiwallet->bindParam('shippingpersonbirthdate', "");
+    
+    // Getting the items in the order
+    $invoicelines = [];
+    $total_amount_by_products = 0;
+    
+    // Iterating through each item in the order
+    foreach ($order->products as $product) {
+        $total_amount_by_products += $product->price;
+        $invoicelines[] = [
+            'productCode' => $product->nid,
+            'productDescription' => $product->title,
+            'quantity' => $product->qty,
+            'price' => $product->price, // Price without tax
+            'taxCategory' => 4
+        ];
+    }
+    if ($order->order_total - $total_amount_by_products > 0) {
+        $invoicelines[] = [
+            'productCode' => '000000',
+            'productDescription' => "Other fees (shipping, additional fees)",
+            'quantity' => 1,
+            'price' => $order->order_total - $total_amount_by_products,
+            'taxCategory' => 4
+        ];
+    }
+    
+    $digiwallet->bindParam('invoicelines', json_encode($invoicelines));
+    $digiwallet->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ *
+ * @param unknown $order
+ * @param DigiwalletCore $digiwallet
+ */
+function uc_digiwallet_additional_parameters_BW($order, DigiwalletCore $digiwallet)
+{
+    $digiwallet->bindParam('salt', $digiwallet->bwSalt);
+    $digiwallet->bindParam('email', $order->primary_email);
+    $digiwallet->bindParam('userip', $_SERVER["REMOTE_ADDR"]);
+}
+
+/**
+ * Function to show bankwire introduction page
+ */
+function uc_digiwallet_bwintro()
+{
+    if (empty($_SESSION['bw_info']))
+        return false;
+        
+    $data = $_SESSION['bw_info'];
+    list ($trxid, $accountNumber, $iban, $bic, $beneficiary, $bank) = explode("|", $data['bw_data']);
+    $transaction = uc_digiwallet_transaction_get($trxid);
+    if(!$transaction)
+        return false;
+    $_SESSION['do_complete'] = TRUE;
+    $_SESSION['uc_checkout'][$transaction->order_id]['do_complete'] = TRUE;
+    unset($_SESSION['cart_order']);
+    uc_cart_empty();
+    $html = '<div class="bankwire-info">
+        <h4>'.t('Thank you for ordering in our webshop!').'</h4>
+        <p>'.
+        t('You will receive your order as soon as we receive payment from the bank. <br>
+            Would you be so friendly to transfer the total amount of @order_total to the bankaccount <b class="tm-highlight">@iban</b> in name of @beneficiary*?',
+            array('@order_total' => uc_currency_format($data['order_total']), '@iban' => $iban, '@beneficiary' => $beneficiary))
+            
+            .'</p>
+        <p>
+            '.t('State the payment feature <b>@trxid</b>, this way the payment can be automatically processed.<br>
+            As soon as this happens you shall receive a confirmation mail on @customer_email .',
+                array('@trxid' => $trxid, '@customer_email' => $data['customer_email'])).'
+        </p>
+        <p>'.t('If it is necessary for payments abroad, then the BIC code from the bank <span class="tm-highlight">@bic</span> and the name of the bank is @bank.',
+            array('@bic' => $bic, '@bank' => $bank)).'</p>
+        <p>
+            <i>'.t('* Payment for our webstore is processed by TargetMedia. TargetMedia is certified as a Collecting Payment Service Provider by Currence. This means we set the highest security standards when is comes to security of payment for you as a customer and us as a webshop.').'</i>
+        </p>
+    </div>';
+            
+    $build = array(
+        '#type' => 'markup',
+        '#markup' => $html
+    );
+    return $build;
+}
+
+/**
+ *
+ * @param unknown $paymethod
+ * @param unknown $trxid
+ * @param string $message
+ * @return boolean
+ */
+function uc_digiwallet_executeReport($paymethod, $trxid, &$message = '', $report = false)
+{
+    $transaction = uc_digiwallet_transaction_get($trxid);
+    if ($transaction) {
+        if ((bool) $transaction->status) {
+            if ($report) {
+                $message = "Already completed, skipped... ";
+            } else {
+                $message = t('Succesfull Digiwallet payment received for order @order_id', array(
+                    '@order_id' => $transaction->order_id
+                ));
+            }
+            return true;
+        }
+        
+        $rtlo = variable_get('uc_digiwallet_rtlo');
+        $token = variable_get('uc_digiwallet_token');
+        $isSuccess = false;
+        $errorMessage = null;
+        if (in_array($paymethod, array('EPS', 'GIP'))) {
+            $digiwalletApi = new Digiwallet\Packages\Transaction\Client\Client('https://api.digiwallet.nl/');
+            $request = new Digiwallet\Packages\Transaction\Client\Request\CheckTransaction($digiwalletApi);
+            $request->withBearer($token);
+            $request->withOutlet($rtlo);
+            $request->withTransactionId($trxid);
+            /** @var \Digiwallet\Packages\Transaction\Client\Response\CheckTransaction $apiResult */
+            $apiResult = $request->send();
+            $apiStatus = $apiResult->getStatus();
+            $isSuccess = ($apiStatus == 0 && $apiResult->getTransactionStatus() == 'Completed') ? true : false;
+            $errorMessage = $apiResult->getMessage();
+        } else {
+            $digiwallet = new DigiwalletCore($paymethod, $rtlo, 'nl');
+            $digiwallet->checkPayment($trxid);
+            $isSuccess = (bool) $digiwallet->getPaidStatus();
+            $errorMessage = $digiwallet->getErrorMessage();
+        }
+        
+        if ($isSuccess) {
+            $message = t('Succesfull Digiwallet payment received for order @order_id', array(
+                '@order_id' => $transaction->order_id
+            ));
+            
+            uc_payment_enter($transaction->order_id, 'digiwallet', $transaction->amount, 0, array(
+                'transaction_id' => $transaction->transaction_id
+            ), $message);
+            uc_order_comment_save($transaction->order_id, 0, $message, 'admin');
+            uc_digiwallet_transaction_status_update($transaction->transaction_id, 1);
+            
+            return true;
+        } else {
+            $message = "Not paid " . $errorMessage . "... ";
+            return false;
+        }
+    } else {
+        $message = "Transaction " . $trxid . " not found... ";
+        watchdog('uc_digiwallet', $message, array(), WATCHDOG_WARNING);
+        
+        return false;
+    }
+}
+
+function uc_digiwallet_return()
+{
+    $paymethod = $_GET['paymethod'];   //GET
+    switch ($paymethod) {
+        case 'PYP':
+            $trxid = $_GET['paypalid'];
+            break;
+        case 'AFP':
+            $trxid = $_GET['invoiceID'];
+            break;
+        case 'EPS':
+        case 'GIP':
+            $trxid = $_GET['transactionID'];
+            break;
+        default:
+            $trxid = $_GET['trxid'];
+    }
+    $message = '';
+    
+    if (uc_digiwallet_executeReport($paymethod, $trxid, $message)) {
+        $transaction = uc_digiwallet_transaction_get($trxid);
+        drupal_set_message($message);
+        $_SESSION['do_complete'] = TRUE;
+        $_SESSION['uc_checkout'][$transaction->order_id]['do_complete'] = TRUE;
+        $goto = 'cart/checkout/complete';
+    } else {
+        drupal_set_message($message, 'error');
+        $goto = 'cart/checkout';
+    }
+    drupal_goto($goto);
+    exit();
+}
+
+function uc_digiwallet_report()
+{
+    $paymethod = $_GET['paymethod'];   //GET
+    switch ($paymethod) {
+        case 'AFP':
+            $trxid = $_POST['invoiceID']; //POST
+            break;
+        case 'PYP':
+            $trxid = $_POST['acquirerID']; //POST old paymentID
+            break;
+        case 'EPS':
+        case 'GIP':
+            $trxid = $_POST['transactionID'];
+            break;
+        default:
+            $trxid = $_POST['trxid']; //POST
+    }
+    $message = '';
+    uc_digiwallet_executeReport($paymethod, $trxid, $message, true);
+    echo($message);
+    
+    echo "|<br>nl Ubercart, " . date('d-m-Y');
+    exit();
+}
+
+function uc_digiwallet_buildOptionsMethod($method, $rtlo, $order)
+{
+    $listMethods = $GLOBALS['listMethods'];
+    $selectedMethod = ! empty($_SESSION['uc_digiwallet']['digiwallet_method']) ? $_SESSION['uc_digiwallet']['digiwallet_method'] : @array_keys($listMethods)[0];
+    $selected = ($method == $selectedMethod);
+    switch ($method) {
+        case "IDE":
+            $idealOBJ = new DigiwalletCore($method, $rtlo);
+            $idealBankListArr = uc_digiwallet_setPaymethodInKey("", $idealOBJ->getBankList());
+            $selectedOption = $selected && ! empty($_SESSION['uc_digiwallet']['digiwallet_option']) ? $_SESSION['uc_digiwallet']['digiwallet_option'] : @array_keys($idealBankListArr)[0];
+            $form['uc_digiwallet_method_' . $method] = array(
+                '#type' => 'radio',
+                '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+                '#suffix' => '</div>',
+                '#name' => 'uc_digiwallet_method',
+                '#title' => $listMethods[$method],
+                '#attributes' => array(
+                    'value' => $method
+                )
+            );
+            if ($selected) {
+                $form['uc_digiwallet_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['dependent_' . $method] = array(
+                '#type' => 'container',
+                '#title' => false,
+                '#attributes' => array(
+                    'class' => array(
+                        'container-digiwallet-option'
+                    )
+                ),
+                '#states' => array(
+                    'visible' => array(
+                        'input[name="uc_digiwallet_method"]' => array(
+                            'value' => $method
+                        )
+                    )
+                )
+            );
+            
+            $form['dependent_' . $method]['uc_digiwallet_select'] = array(
+                '#type' => 'select',
+                '#name' => "uc_digiwallet_option[$method]",
+                '#options' => $idealBankListArr,
+                '#default_value' => $selectedOption
+            );
+            return $form;
+            break;
+        case "DEB":
+            $directEBankingOBJ = new DigiwalletCore($method, $rtlo);
+            $directEBankingBankListArr = uc_digiwallet_setPaymethodInKey("", $directEBankingOBJ->getCountryList());
+            $selectedOption = $selected && ! empty($_SESSION['uc_digiwallet']['digiwallet_option']) ? $_SESSION['uc_digiwallet']['digiwallet_option'] : @array_keys($directEBankingBankListArr)[0];
+            $form['uc_digiwallet_method_' . $method] = array(
+                '#type' => 'radio',
+                '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+                '#suffix' => '</div>',
+                '#name' => 'uc_digiwallet_method',
+                '#title' => $listMethods[$method],
+                '#attributes' => array(
+                    'value' => $method
+                )
+            );
+            if ($selected) {
+                $form['uc_digiwallet_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['dependent_' . $method] = array(
+                '#type' => 'container',
+                '#title' => false,
+                '#attributes' => array(
+                    'class' => array(
+                        'container-digiwallet-option'
+                    )
+                ),
+                '#states' => array(
+                    'visible' => array(
+                        'input[name="uc_digiwallet_method"]' => array(
+                            'value' => $method
+                        )
+                    )
+                )
+            );
+            $form['dependent_' . $method]['uc_digiwallet_select'] = array(
+                '#type' => 'select',
+                '#name' => "uc_digiwallet_option[$method]",
+                '#options' => $directEBankingBankListArr,
+                '#default_value' => $selectedOption
+            );
+            return $form;
+            break;
+        case "MRC":
+        case "WAL":
+        case "CC":
+        case "EPS":
+        case "GIP":
+        default:
+            $form['uc_digiwallet_method_' . $method] = array(
+            '#type' => 'radio',
+            '#prefix' => '<div class="payment-item-wrapper ' . $method . '">',
+            '#suffix' => '</div>',
+            '#name' => 'uc_digiwallet_method',
+            '#title' => $listMethods[$method],
+            '#attributes' => array(
+            'value' => $method
+            )
+            );
+            if ($selected) {
+                $form['uc_digiwallet_method_' . $method]['#attributes']['checked'] = 'checked';
+            }
+            $form['uc_digiwallet_options_' . $method] = array(
+                '#type' => 'hidden',
+                '#name' => "uc_digiwallet_option[$method]",
+                '#title' => $listMethods[$method],
+                '#value' => $method
+            );
+            return $form;
+            break;
+    }
+}
+
+function uc_digiwallet_setPaymethodInKey($paymethod, $BankListArray)
+{
+    $newArr = array();
+    foreach ($BankListArray as $key => $value) {
+        $newArr[strtoupper($paymethod) . $key] = $value;
+    }
+    return $newArr;
+}
+
+function uc_digiwallet_transaction_save($transaction)
+{
+    $conn = Database::getConnection();
+    $conn->insert('uc_payment_digiwallet')
+        ->fields(array(
+        'order_id' => $transaction->order_id,
+        'paymethod' => $transaction->paymethod,
+        'transaction_id' => $transaction->transaction_id,
+        'rtlo' => $transaction->rtlo,
+        'token' => $transaction->token,
+        'bank_id' => $transaction->bank_id,
+        'description' => $transaction->description,
+        'amount' => $transaction->amount,
+        'status' => $transaction->status,
+        'more_information' => $transaction->more_information,
+        'created' => $transaction->created
+    ))
+        ->execute();
+}
+
+function uc_digiwallet_transaction_get($transaction_id)
+{
+    return db_query("SELECT * FROM {uc_payment_digiwallet} WHERE transaction_id = :transaction_id", array(
+        ':transaction_id' => $transaction_id
+    ))->fetchObject();
+}
+
+function uc_digiwallet_transaction_status_update($transaction_id, $status = 0)
+{
+    db_update('uc_payment_digiwallet')->fields(array(
+        'status' => $status
+    ))
+    ->condition('transaction_id', check_plain($transaction_id))
+    ->execute();
+}
+function uc_digiwallet_get_customer_ip()
+{
+    if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
+        //ip from share internet
+        $ip = $_SERVER['HTTP_CLIENT_IP'];
+    } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        //ip pass from proxy
+        $ip = $_SERVER['HTTP_X_FORWARDED_FOR'];
+    } else {
+        $ip = $_SERVER['REMOTE_ADDR'];
+    }
+    
+    return $ip;
+}

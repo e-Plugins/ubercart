@@ -1,0 +1,5 @@
+uc_digiwallet.style:
+  version: 1.x
+  css:
+    theme:
+      css/digiwallet-checkout.css: {}

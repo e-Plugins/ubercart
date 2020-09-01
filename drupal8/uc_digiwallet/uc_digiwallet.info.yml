@@ -1,0 +1,16 @@
+name: Digiwallet for Ubercart
+description: Activates iDEAL, Bancontact, Sofort Banking, Visa / Mastercard Credit cards, PaysafeCard, AfterPay, BankWire, PayPal and Refunds in Ubercart
+package: Ubercart - payment
+type: module
+version: 8.x-4.x-1.1
+  
+interface translation project: uc_digiwallet
+interface translation server pattern: sites/all/modules/uc_digiwallet/translations/%language.po
+
+core: 8.x
+  
+datestamp: 1485241067
+
+dependencies:
+  - uc_payment
+  

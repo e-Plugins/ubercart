@@ -1,0 +1,58 @@
+@CHARSET "UTF-8";
+.container-digiwallet-option {
+  padding-left: 30px;
+}
+
+
+.payment-item-wrapper {
+  margin:20px 0;
+}
+.payment-item-wrapper label.option{
+  padding:10px 0 10px 40px;
+  text-indent:-9999px;
+  background-repeat: no-repeat;
+  background-position:left;
+  font-weight: bold;
+}
+.payment-item-wrapper.IDE label.option {
+  background-image:url(../images/IDE.png);
+}
+.payment-item-wrapper.MRC label.option {
+  background-image:url(../images/MRC.png);
+  padding-left: 50px;
+}
+.payment-item-wrapper.WAL label.option {
+  background-image:url(../images/WAL.png);
+  padding-left: 140px;
+  
+}
+.payment-item-wrapper.DEB label.option {
+  background-image:url(../images/DEB.png);
+}
+.payment-item-wrapper.CC label.option {
+  background-image:url(../images/CC.png);
+  padding-left: 150px;
+}
+.payment-item-wrapper.BW label.option {
+  background-image:url(../images/BW.png);
+  padding-left: 70px;
+}
+.payment-item-wrapper.AFP label.option {
+  background-image:url(../images/AFP.png);
+  padding-left: 145px;
+}
+.payment-item-wrapper.PYP label.option {
+  background-image:url(../images/PYP.png);
+  padding-left: 125px;
+}
+.payment-item-wrapper.EPS label.option {
+  background-image:url(../images/EPS.png);
+  padding-left: 67px;
+}
+.payment-item-wrapper.GIP label.option {
+  background-image:url(../images/GIP.png);
+  padding-left: 50px;
+}
+.tm-highlight {
+  color: #c94c4c;
+}
