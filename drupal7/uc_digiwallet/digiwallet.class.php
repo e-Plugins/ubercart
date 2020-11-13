@@ -12,7 +12,7 @@
 */
 class DigiwalletCore
 {
-    const APP_ID = 'dw_ubercart3x.0.1';
+    const APP_ID = 'dw_ubercart3x.1.2';
     // Constants
     const MIN_AMOUNT = 84;
 

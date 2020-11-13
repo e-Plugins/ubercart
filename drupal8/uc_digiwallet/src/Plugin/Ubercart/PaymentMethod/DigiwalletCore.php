@@ -13,7 +13,7 @@ namespace Drupal\uc_digiwallet\Plugin\Ubercart\PaymentMethod;
  */
 class DigiwalletCore
 {
-    const APP_ID = 'dw_ubercart4x.0.1';
+    const APP_ID = 'dw_ubercart4x.1.2';
 
     // Constants
     const MIN_AMOUNT = 84;

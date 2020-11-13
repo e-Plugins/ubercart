@@ -54,6 +54,9 @@ function uc_targetpay_call($order, $obj)
     $targetPay->setCancelUrl($cancelUrl);
     $targetPay->setReturnUrl($returnUrl);
     $targetPay->setReportUrl($reportUrl);
+    if ($order->primary_email->value) {
+        $targetPay->bindParam('email', $order->primary_email->value);
+    }
     
     if ($payMethod == 'AFP') {
         additionalParametersAFP($order, $targetPay); // add addtitional params for afterpay and bankwire

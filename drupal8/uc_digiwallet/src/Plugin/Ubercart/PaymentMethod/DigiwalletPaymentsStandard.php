@@ -95,7 +95,7 @@ class DigiwalletPaymentsStandard extends DigiwalletPaymentMethodPluginBase imple
                 '#type' => 'radio',
                 '#name' => "method",
                 '#title' => $description,
-                '#prefix' => '<div class="payment-item-wrapper ' . $type . '">',
+                '#prefix' => '<div class="dw-payment-item-wrapper ' . $type . '">',
                 '#suffix' => '</div>',
                 '#attributes' => array(
                     'class' => array(
